@@ -1,0 +1,24 @@
+# DSGen build artifacts
+DSGen-software-code-4.0.0/tools/*.o
+DSGen-software-code-4.0.0/tools/dsdgen
+DSGen-software-code-4.0.0/tools/dsqgen
+DSGen-software-code-4.0.0/tools/distcomp
+DSGen-software-code-4.0.0/tools/mkheader
+DSGen-software-code-4.0.0/tools/checksum
+DSGen-software-code-4.0.0/tools/tpcds.idx
+DSGen-software-code-4.0.0/tools/tpcds.idx.h
+DSGen-software-code-4.0.0/tools/columns.h
+DSGen-software-code-4.0.0/tools/streams.h
+DSGen-software-code-4.0.0/tools/y.tab.c
+DSGen-software-code-4.0.0/tools/y.tab.h
+DSGen-software-code-4.0.0/tools/y.output
+DSGen-software-code-4.0.0/tools/tokenizer.c
+DSGen-software-code-4.0.0/tools/.ctags_updated
+DSGen-software-code-4.0.0/tools/tags
+
+# pg_regress output
+results/
+regression.diffs
+regression.out
+log/
+tmp_check/

@@ -1,0 +1,5 @@
+# tpcds extension
+comment = 'TPC-DS benchmark for PostgreSQL'
+default_version = '1.0'
+relocatable = false
+schema = tpcds

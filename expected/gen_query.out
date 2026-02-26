@@ -1,0 +1,30 @@
+SELECT tpcds.gen_query();
+                 gen_query                 
+-------------------------------------------
+ Generated and stored 99 queries (scale=1)
+(1 row)
+
+-- Verify 99 queries generated
+SELECT count(*) FROM tpcds.query;
+ count 
+-------
+    99
+(1 row)
+
+-- Spot check: queries exist and are non-empty
+SELECT query_id, length(query_text) > 0 AS has_text
+  FROM tpcds.query WHERE query_id IN (1, 50, 99) ORDER BY query_id;
+ query_id | has_text 
+----------+----------
+        1 | t
+       50 | t
+       99 | t
+(3 rows)
+
+-- show() works
+SELECT length(tpcds.show(1)) > 0;
+ ?column? 
+----------
+ t
+(1 row)
+
