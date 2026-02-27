@@ -27,10 +27,12 @@ make install
 ```sql
 CREATE EXTENSION tpcds;       -- 1. install the extension
 SELECT tpcds.gen_schema();    -- 2. create 25 TPC-DS tables
-SELECT tpcds.gen_data(1);     -- 3. generate & load SF-1 (~1GB) data (auto-analyzes, cleans up .dat files)
-SELECT tpcds.gen_data(1, 8);  -- 3. same, but generate data using 8 parallel workers
-SELECT tpcds.gen_query();     -- 4. generate 99 queries, saved to query_dir as .sql files
-SELECT tpcds.bench();         -- 5. run all 99 queries, results + summary.csv in results_dir
+SELECT tpcds.gen_data(1);     -- 3. generate SF-1 (~1GB) .dat files
+SELECT tpcds.gen_data(1, 8);  -- 3. same, but with 8 parallel workers
+SELECT tpcds.load_data();     -- 4. load .dat files into tables (auto-analyzes)
+SELECT tpcds.gen_query();     -- 5. generate 99 queries, saved to query_dir as .sql files
+SELECT tpcds.bench();         -- 6. run all 99 queries, results + summary.csv in results_dir
+SELECT tpcds.clean_data();    -- 7. (optional) delete .dat files to free disk space
 ```
 
 That's it. Schema, data, queries, benchmark — done.
@@ -57,9 +59,13 @@ Per-query output is written to `results_dir` (`queryXX.out` or `queryXX_explain.
 
 | Function | Returns | Description |
 |----------|---------|-------------|
+| `tpcds.config(key)` | TEXT | Get config value |
+| `tpcds.config(key, value)` | TEXT | Set config value |
 | `tpcds.info()` | TABLE | Show all resolved paths and scale factor |
 | `tpcds.gen_schema()` | TEXT | Create 25 TPC-DS tables under `tpcds` schema |
-| `tpcds.gen_data(scale, parallel=1)` | TEXT | Generate data, load, and analyze all tables. Set `parallel > 1` to run that many dsdgen workers simultaneously. |
+| `tpcds.gen_data(scale, parallel=1)` | TEXT | Generate .dat files via dsdgen. Set `parallel > 1` for multiple workers. |
+| `tpcds.load_data()` | TEXT | Load .dat files into tables and analyze. Can be re-run without regenerating. |
+| `tpcds.clean_data()` | TEXT | Delete .dat files from data_dir to free disk space. |
 | `tpcds.gen_query(seed)` | TEXT | Generate 99 queries, store in `tpcds.query` table and `query_dir` |
 | `tpcds.show(qid)` | TEXT | Return query text |
 | `tpcds.exec(qid)` | TEXT | Execute one query, save result to `tpcds.bench_results` |
@@ -178,20 +184,20 @@ SELECT * FROM tpcds.info();
 Everything works out of the box. All directories except `data_dir` are auto-detected under the extension install path. Optional overrides:
 
 ```sql
-UPDATE tpcds.config SET value = '/data/tpcds' WHERE key = 'data_dir';
-UPDATE tpcds.config SET value = '/data/results' WHERE key = 'results_dir';
-UPDATE tpcds.config SET value = '/data/queries' WHERE key = 'query_dir';
+SELECT tpcds.config('data_dir', '/data/tpcds');
+SELECT tpcds.config('results_dir', '/data/results');
+SELECT tpcds.config('query_dir', '/data/queries');
 ```
 
 > **Disk space warning:** `gen_data()` writes raw `.dat` files to `data_dir` before loading them into
-> PostgreSQL, then deletes them. The `.dat` files are roughly the same size as the loaded data
-> (~1 GB per scale factor). Make sure `data_dir` has enough free space — at least **2× the scale
-> factor in GB** to account for both the `.dat` files and the database storage. The default
-> `data_dir` is `/tmp/tpcds_data`, which may be too small for large scale factors. Set it to a
-> partition with sufficient space before running `gen_data()`:
+> PostgreSQL. The `.dat` files are roughly the same size as the loaded data (~1 GB per scale
+> factor). Make sure `data_dir` has enough free space — at least **2× the scale factor in GB** to
+> account for both the `.dat` files and the database storage. The default `data_dir` is
+> `/tmp/tpcds_data`, which may be too small for large scale factors. Set it to a partition with
+> sufficient space before running `gen_data()`:
 >
 > ```sql
-> UPDATE tpcds.config SET value = '/data/tpcds_tmp' WHERE key = 'data_dir';
+> SELECT tpcds.config('data_dir', '/data/tpcds_tmp');
 > SELECT tpcds.gen_data(100, 8);  -- SF=100 needs ~100 GB in data_dir
 > ```
 

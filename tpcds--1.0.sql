@@ -86,6 +86,35 @@ END;
 $func$;
 
 -- =============================================================================
+-- config(key) — get config value
+-- config(key, value) — set config value (upsert)
+-- =============================================================================
+CREATE OR REPLACE FUNCTION tpcds.config(cfg_key TEXT)
+RETURNS TEXT
+LANGUAGE plpgsql
+AS $func$
+DECLARE
+    _val TEXT;
+BEGIN
+    SELECT value INTO _val FROM tpcds.config WHERE key = cfg_key;
+    RETURN _val;
+END;
+$func$;
+
+CREATE OR REPLACE FUNCTION tpcds.config(cfg_key TEXT, cfg_value TEXT)
+RETURNS TEXT
+LANGUAGE plpgsql
+AS $func$
+BEGIN
+    UPDATE tpcds.config SET value = cfg_value WHERE key = cfg_key;
+    IF NOT FOUND THEN
+        INSERT INTO tpcds.config (key, value) VALUES (cfg_key, cfg_value);
+    END IF;
+    RETURN cfg_value;
+END;
+$func$;
+
+-- =============================================================================
 -- info() — show resolved configuration
 -- =============================================================================
 CREATE OR REPLACE FUNCTION tpcds.info()
@@ -783,10 +812,14 @@ END;
 $func$;
 
 -- =============================================================================
--- gen_data(scale, parallel) — generate and load data via dsdgen binary
+-- gen_data(scale, parallel) — generate .dat files via dsdgen binary
+-- Does NOT load into tables or delete files. Use load_data() afterwards.
 -- parallel defaults to 1 (sequential). Set parallel > 1 to run that many
 -- dsdgen workers simultaneously, which can dramatically cut wall-clock time.
--- Example: SELECT tpcds.gen_data(10, 8);  -- SF=10 with 8 parallel workers
+-- Example:
+--   SELECT tpcds.gen_data(10, 8);   -- generate SF=10 with 8 parallel workers
+--   SELECT tpcds.load_data();       -- load into tables
+--   SELECT tpcds.clean_data();      -- free disk space when done
 -- =============================================================================
 CREATE OR REPLACE FUNCTION tpcds.gen_data(scale_factor INTEGER, parallel INTEGER DEFAULT 1)
 RETURNS TEXT
@@ -795,20 +828,8 @@ AS $func$
 DECLARE
     _tpcds_dir TEXT;
     _data_dir TEXT;
-    _tbl TEXT;
-    _tables TEXT[] := ARRAY[
-        'dbgen_version','customer_address','customer_demographics','date_dim',
-        'warehouse','ship_mode','time_dim','reason','income_band','item',
-        'store','call_center','customer','web_site','store_returns',
-        'household_demographics','web_page','promotion','catalog_page',
-        'inventory','catalog_returns','web_returns','web_sales',
-        'catalog_sales','store_sales'
-    ];
     _start_ts TIMESTAMPTZ;
-    _row_count BIGINT;
-    _total_rows BIGINT := 0;
     _gen_cmd TEXT;
-    _load_cmd TEXT;
 BEGIN
     IF parallel < 1 THEN
         RAISE EXCEPTION 'parallel must be >= 1';
@@ -820,11 +841,6 @@ BEGIN
     IF _data_dir IS NULL OR _data_dir = '' THEN
         _data_dir := '/tmp/tpcds_data';
     END IF;
-
-    -- Truncate all tables
-    FOREACH _tbl IN ARRAY _tables LOOP
-        EXECUTE format('TRUNCATE tpcds.%I CASCADE', _tbl);
-    END LOOP;
 
     -- Create data directory
     EXECUTE format('COPY (SELECT 1) TO PROGRAM %L', 'mkdir -p ' || _data_dir);
@@ -845,16 +861,72 @@ BEGIN
     RAISE NOTICE 'Data generation completed in % seconds',
         extract(epoch from clock_timestamp() - _start_ts);
 
+    -- Save scale_factor and parallel so load_data()/gen_query() can pick them up
+    UPDATE tpcds.config SET value = scale_factor::TEXT WHERE key = 'scale_factor';
+    IF NOT FOUND THEN
+        INSERT INTO tpcds.config (key, value) VALUES ('scale_factor', scale_factor::TEXT);
+    END IF;
+    UPDATE tpcds.config SET value = parallel::TEXT WHERE key = 'parallel';
+    IF NOT FOUND THEN
+        INSERT INTO tpcds.config (key, value) VALUES ('parallel', parallel::TEXT);
+    END IF;
+
+    RETURN format('Generated .dat files at SF=%s (parallel=%s) in %s', scale_factor, parallel, _data_dir);
+END;
+$func$;
+
+-- =============================================================================
+-- load_data() — load .dat files from data_dir into tables, then analyze
+-- Reads parallel from config (saved by gen_data) to determine file naming.
+-- =============================================================================
+CREATE OR REPLACE FUNCTION tpcds.load_data()
+RETURNS TEXT
+LANGUAGE plpgsql
+AS $func$
+DECLARE
+    _data_dir TEXT;
+    _parallel INTEGER;
+    _tbl TEXT;
+    _tables TEXT[] := ARRAY[
+        'dbgen_version','customer_address','customer_demographics','date_dim',
+        'warehouse','ship_mode','time_dim','reason','income_band','item',
+        'store','call_center','customer','web_site','store_returns',
+        'household_demographics','web_page','promotion','catalog_page',
+        'inventory','catalog_returns','web_returns','web_sales',
+        'catalog_sales','store_sales'
+    ];
+    _start_ts TIMESTAMPTZ;
+    _row_count BIGINT;
+    _total_rows BIGINT := 0;
+    _load_cmd TEXT;
+BEGIN
+    SELECT value INTO _data_dir FROM tpcds.config WHERE key = 'data_dir';
+    IF _data_dir IS NULL OR _data_dir = '' THEN
+        _data_dir := '/tmp/tpcds_data';
+    END IF;
+
+    SELECT value::INTEGER INTO _parallel FROM tpcds.config WHERE key = 'parallel';
+    IF _parallel IS NULL THEN
+        _parallel := 1;
+    END IF;
+
+    -- Truncate all tables before loading
+    FOREACH _tbl IN ARRAY _tables LOOP
+        EXECUTE format('TRUNCATE tpcds.%I CASCADE', _tbl);
+    END LOOP;
+
     -- Load each table via COPY FROM PROGRAM (strip trailing pipe)
-    -- With parallel > 1, cat all child files for the table before loading.
     FOREACH _tbl IN ARRAY _tables LOOP
         _start_ts := clock_timestamp();
         BEGIN
-            IF parallel = 1 THEN
+            IF _parallel = 1 THEN
                 _load_cmd := format('sed ''s/|$//'' %s/%s.dat', _data_dir, _tbl);
             ELSE
-                _load_cmd := format('cat %s/%s_*_%s.dat | sed ''s/|$//''',
-                                    _data_dir, _tbl, parallel);
+                -- Use explicit loop instead of glob to avoid prefix collisions
+                -- (e.g. store_*_96.dat would also match store_returns_*_96.dat)
+                _load_cmd := format(
+                    'for i in $(seq 1 %s); do cat %s/%s_${i}_%s.dat 2>/dev/null; done | sed ''s/|$//''',
+                    _parallel, _data_dir, _tbl, _parallel);
             END IF;
             EXECUTE format(
                 'COPY tpcds.%I FROM PROGRAM %L WITH (DELIMITER %L, NULL %L)',
@@ -875,18 +947,29 @@ BEGIN
         EXECUTE format('ANALYZE tpcds.%I', _tbl);
     END LOOP;
 
-    -- Clean up .dat files to free disk space
-    EXECUTE format('COPY (SELECT 1) TO PROGRAM %L',
-        format('rm -f %s/*.dat', _data_dir));
-    RAISE NOTICE 'Cleaned up .dat files from %', _data_dir;
+    RETURN format('Loaded %s total rows from %s', _total_rows, _data_dir);
+END;
+$func$;
 
-    -- Save scale factor so gen_query() can pick it up
-    UPDATE tpcds.config SET value = scale_factor::TEXT WHERE key = 'scale_factor';
-    IF NOT FOUND THEN
-        INSERT INTO tpcds.config (key, value) VALUES ('scale_factor', scale_factor::TEXT);
+-- =============================================================================
+-- clean_data() — delete .dat files from data_dir to free disk space
+-- =============================================================================
+CREATE OR REPLACE FUNCTION tpcds.clean_data()
+RETURNS TEXT
+LANGUAGE plpgsql
+AS $func$
+DECLARE
+    _data_dir TEXT;
+BEGIN
+    SELECT value INTO _data_dir FROM tpcds.config WHERE key = 'data_dir';
+    IF _data_dir IS NULL OR _data_dir = '' THEN
+        _data_dir := '/tmp/tpcds_data';
     END IF;
 
-    RETURN format('Loaded %s total rows at SF=%s (parallel=%s)', _total_rows, scale_factor, parallel);
+    EXECUTE format('COPY (SELECT 1) TO PROGRAM %L',
+        format('rm -f %s/*.dat', _data_dir));
+
+    RETURN format('Cleaned up .dat files from %s', _data_dir);
 END;
 $func$;
 
@@ -1291,3 +1374,20 @@ BEGIN
     PERFORM set_config('search_path', _saved_path, false);
 END;
 $func$;
+
+-- =============================================================================
+-- Extension loaded — remind user to configure data_dir
+-- =============================================================================
+DO $notice$
+BEGIN
+    RAISE WARNING E'\n'
+        '  tpcds extension installed.\n'
+        '  Default data_dir is /tmp/tpcds_data — this may be too small for large scale factors.\n'
+        '  To change it:  SELECT tpcds.config(''data_dir'', ''/your/path'');\n'
+        '  Quick start:   SELECT tpcds.gen_schema();\n'
+        '                 SELECT tpcds.gen_data(1);\n'
+        '                 SELECT tpcds.load_data();\n'
+        '                 SELECT tpcds.gen_query();\n'
+        '                 SELECT tpcds.bench();';
+END;
+$notice$;
