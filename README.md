@@ -12,7 +12,7 @@ The `tpcds` extension implements the data generator and queries for the
 sudo apt-get install build-essential flex bison
 
 # RHEL/Rocky/CentOS/Fedora
-sudo dnf install gcc make flex bison
+sudo dnf install gcc make flex bison byacc
 ```
 
 Then:
