@@ -783,9 +783,12 @@ END;
 $func$;
 
 -- =============================================================================
--- gen_data(scale) — generate and load data via dsdgen binary
+-- gen_data(scale, parallel) — generate and load data via dsdgen binary
+-- parallel defaults to 1 (sequential). Set parallel > 1 to run that many
+-- dsdgen workers simultaneously, which can dramatically cut wall-clock time.
+-- Example: SELECT tpcds.gen_data(10, 8);  -- SF=10 with 8 parallel workers
 -- =============================================================================
-CREATE OR REPLACE FUNCTION tpcds.gen_data(scale_factor INTEGER)
+CREATE OR REPLACE FUNCTION tpcds.gen_data(scale_factor INTEGER, parallel INTEGER DEFAULT 1)
 RETURNS TEXT
 LANGUAGE plpgsql
 AS $func$
@@ -804,7 +807,13 @@ DECLARE
     _start_ts TIMESTAMPTZ;
     _row_count BIGINT;
     _total_rows BIGINT := 0;
+    _gen_cmd TEXT;
+    _load_cmd TEXT;
 BEGIN
+    IF parallel < 1 THEN
+        RAISE EXCEPTION 'parallel must be >= 1';
+    END IF;
+
     _tpcds_dir := tpcds._resolve_dir('tpcds_dir', 'tpcds_dsgen');
 
     SELECT value INTO _data_dir FROM tpcds.config WHERE key = 'data_dir';
@@ -821,25 +830,35 @@ BEGIN
     EXECUTE format('COPY (SELECT 1) TO PROGRAM %L', 'mkdir -p ' || _data_dir);
 
     -- Generate data using dsdgen binary
+    -- With parallel > 1: launch N workers via xargs -P, each handling one chunk.
+    -- Output files are named <table>_<child>_<parallel>.dat per dsdgen convention.
     _start_ts := clock_timestamp();
-    EXECUTE format(
-        'COPY (SELECT 1) TO PROGRAM %L',
-        format('cd %s/tools && ./dsdgen -scale %s -dir %s -force',
-               _tpcds_dir, scale_factor, _data_dir)
-    );
+    IF parallel = 1 THEN
+        _gen_cmd := format('cd %s/tools && ./dsdgen -scale %s -dir %s -force',
+                           _tpcds_dir, scale_factor, _data_dir);
+    ELSE
+        _gen_cmd := format(
+            'cd %s/tools && seq 1 %s | xargs -P %s -I{} ./dsdgen -scale %s -dir %s -force -parallel %s -child {}',
+            _tpcds_dir, parallel, parallel, scale_factor, _data_dir, parallel);
+    END IF;
+    EXECUTE format('COPY (SELECT 1) TO PROGRAM %L', _gen_cmd);
     RAISE NOTICE 'Data generation completed in % seconds',
         extract(epoch from clock_timestamp() - _start_ts);
 
     -- Load each table via COPY FROM PROGRAM (strip trailing pipe)
+    -- With parallel > 1, cat all child files for the table before loading.
     FOREACH _tbl IN ARRAY _tables LOOP
         _start_ts := clock_timestamp();
         BEGIN
+            IF parallel = 1 THEN
+                _load_cmd := format('sed ''s/|$//'' %s/%s.dat', _data_dir, _tbl);
+            ELSE
+                _load_cmd := format('cat %s/%s_*_%s.dat | sed ''s/|$//''',
+                                    _data_dir, _tbl, parallel);
+            END IF;
             EXECUTE format(
                 'COPY tpcds.%I FROM PROGRAM %L WITH (DELIMITER %L, NULL %L)',
-                _tbl,
-                format('sed ''s/|$//'' %s/%s.dat', _data_dir, _tbl),
-                '|',
-                ''
+                _tbl, _load_cmd, '|', ''
             );
             GET DIAGNOSTICS _row_count = ROW_COUNT;
             _total_rows := _total_rows + _row_count;
@@ -867,7 +886,7 @@ BEGIN
         INSERT INTO tpcds.config (key, value) VALUES ('scale_factor', scale_factor::TEXT);
     END IF;
 
-    RETURN format('Loaded %s total rows at SF=%s', _total_rows, scale_factor);
+    RETURN format('Loaded %s total rows at SF=%s (parallel=%s)', _total_rows, scale_factor, parallel);
 END;
 $func$;
 

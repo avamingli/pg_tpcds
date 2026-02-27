@@ -28,6 +28,7 @@ make install
 CREATE EXTENSION tpcds;       -- 1. install the extension
 SELECT tpcds.gen_schema();    -- 2. create 25 TPC-DS tables
 SELECT tpcds.gen_data(1);     -- 3. generate & load SF-1 (~1GB) data (auto-analyzes, cleans up .dat files)
+SELECT tpcds.gen_data(1, 8);  -- 3. same, but generate data using 8 parallel workers
 SELECT tpcds.gen_query();     -- 4. generate 99 queries, saved to query_dir as .sql files
 SELECT tpcds.bench();         -- 5. run all 99 queries, results + summary.csv in results_dir
 ```
@@ -58,7 +59,7 @@ Per-query output is written to `results_dir` (`queryXX.out` or `queryXX_explain.
 |----------|---------|-------------|
 | `tpcds.info()` | TABLE | Show all resolved paths and scale factor |
 | `tpcds.gen_schema()` | TEXT | Create 25 TPC-DS tables under `tpcds` schema |
-| `tpcds.gen_data(scale)` | TEXT | Generate data, load, and analyze all tables |
+| `tpcds.gen_data(scale, parallel=1)` | TEXT | Generate data, load, and analyze all tables. Set `parallel > 1` to run that many dsdgen workers simultaneously. |
 | `tpcds.gen_query(seed)` | TEXT | Generate 99 queries, store in `tpcds.query` table and `query_dir` |
 | `tpcds.show(qid)` | TEXT | Return query text |
 | `tpcds.exec(qid)` | TEXT | Execute one query, save result to `tpcds.bench_results` |
@@ -181,6 +182,18 @@ UPDATE tpcds.config SET value = '/data/tpcds' WHERE key = 'data_dir';
 UPDATE tpcds.config SET value = '/data/results' WHERE key = 'results_dir';
 UPDATE tpcds.config SET value = '/data/queries' WHERE key = 'query_dir';
 ```
+
+> **Disk space warning:** `gen_data()` writes raw `.dat` files to `data_dir` before loading them into
+> PostgreSQL, then deletes them. The `.dat` files are roughly the same size as the loaded data
+> (~1 GB per scale factor). Make sure `data_dir` has enough free space — at least **2× the scale
+> factor in GB** to account for both the `.dat` files and the database storage. The default
+> `data_dir` is `/tmp/tpcds_data`, which may be too small for large scale factors. Set it to a
+> partition with sufficient space before running `gen_data()`:
+>
+> ```sql
+> UPDATE tpcds.config SET value = '/data/tpcds_tmp' WHERE key = 'data_dir';
+> SELECT tpcds.gen_data(100, 8);  -- SF=100 needs ~100 GB in data_dir
+> ```
 
 ## PostgreSQL Compatibility Fixes
 
