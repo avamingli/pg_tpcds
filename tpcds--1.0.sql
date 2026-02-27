@@ -1035,7 +1035,7 @@ BEGIN
     INSERT INTO tpcds.bench_results (query_id, status, duration_ms, rows_returned)
     VALUES (qid, _status, round(_total_dur, 2), _total_rows);
 
-    RETURN format('query %s: %s, %.2f ms, %s rows', qid, _status, _total_dur, _total_rows);
+    RETURN format('query %s: %s, %s ms, %s rows', qid, _status, round(_total_dur, 2), _total_rows);
 END;
 $func$;
 
@@ -1151,8 +1151,8 @@ BEGIN
                     _total_dur := _total_dur + _dur;
                     _total_rows := _total_rows + _rows;
                     _all_lines := _all_lines
-                        || format('Statement %s: %s rows, %.2f ms',
-                                  _part, _rows, _dur) || E'\n';
+                        || format('Statement %s: %s rows, %s ms',
+                                  _part, _rows, round(_dur, 2)) || E'\n';
                 EXCEPTION WHEN OTHERS THEN
                     _status := 'ERROR: ' || SQLERRM;
                     _dur := extract(epoch from clock_timestamp() - _start_ts) * 1000;
@@ -1184,7 +1184,7 @@ BEGIN
             _err_count := _err_count + 1;
         END IF;
 
-        RAISE NOTICE 'query %: % (%.0f ms)', _qid, _status, _total_dur;
+        RAISE NOTICE 'query %: % (% ms)', _qid, _status, round(_total_dur);
     END LOOP;
 
     -- Update bench_summary table with latest run
