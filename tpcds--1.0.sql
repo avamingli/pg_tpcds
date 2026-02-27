@@ -824,7 +824,7 @@ BEGIN
     _start_ts := clock_timestamp();
     EXECUTE format(
         'COPY (SELECT 1) TO PROGRAM %L',
-        format('%s/tools/dsdgen -scale %s -dir %s -force -terminate n',
+        format('cd %s/tools && ./dsdgen -scale %s -dir %s -force -terminate n',
                _tpcds_dir, scale_factor, _data_dir)
     );
     RAISE NOTICE 'Data generation completed in % seconds',
