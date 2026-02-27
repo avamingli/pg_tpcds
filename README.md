@@ -66,7 +66,7 @@ Per-query output is written to `results_dir` (`queryXX.out` or `queryXX_explain.
 | `tpcds.gen_data(scale, parallel=1)` | TEXT | Generate .dat files via dsdgen. Set `parallel > 1` for multiple workers. |
 | `tpcds.load_data()` | TEXT | Load .dat files into tables and analyze. Can be re-run without regenerating. |
 | `tpcds.clean_data()` | TEXT | Delete .dat files from data_dir to free disk space. |
-| `tpcds.gen_query(seed)` | TEXT | Generate 99 queries, store in `tpcds.query` table and `query_dir` |
+| `tpcds.gen_query(scale)` | TEXT | Generate 99 queries. `scale` overrides config (default: from gen_data). |
 | `tpcds.show(qid)` | TEXT | Return query text |
 | `tpcds.exec(qid)` | TEXT | Execute one query, save result to `tpcds.bench_results` |
 | `tpcds.bench(mode)` | TEXT | Run or explain all 99 queries, update `bench_summary` |
