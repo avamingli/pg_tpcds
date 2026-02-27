@@ -1076,7 +1076,7 @@ DECLARE
     _bench_dur NUMERIC;
     _saved_path TEXT;
 BEGIN
-    _bench_start := clock_timestamp();
+    _bench_start := now();
     _saved_path := current_setting('search_path');
     PERFORM set_config('search_path', 'tpcds, public', false);
 
