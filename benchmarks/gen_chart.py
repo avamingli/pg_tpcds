@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Generate benchmark report from PostgreSQL bench_summary data.
+"""Generate TPC-DS benchmark chart and report from bench_summary.
 
-Creates a dated subdirectory with summary.csv, queries.png (bar chart),
-and meta.json.  Regenerates README.md to index all historical runs.
+Connects to PostgreSQL using standard environment variables ($PGHOST,
+$PGPORT, $PGDATABASE, $PGUSER, $PGPASSWORD) and reads tpcds.bench_summary.
 
-Works for both pg_tpcds and pg_tpch — auto-detects from script path.
+Creates a dated subdirectory under benchmarks/ with:
+  - queries.png   bar chart of per-query timing
+  - summary.csv   query_id, status, duration_ms, rows_returned
+  - meta.json     PG version, system info, summary statistics
+
+Also regenerates benchmarks/README.md to index all historical runs.
 
 Usage:
-    python3 benchmarks/report.py                # use defaults
-    python3 benchmarks/report.py -d mydb --sf 100
-    python3 benchmarks/report.py --schema tpcds --date 2026-02-28
+    python3 benchmarks/gen_chart.py
 """
 
-import argparse
 import csv
 import datetime
 import glob
@@ -30,68 +32,45 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 
-# ---------------------------------------------------------------------------
-# Benchmark configurations
-# ---------------------------------------------------------------------------
-CONFIGS = {
-    "tpcds": {"bench_name": "TPC-DS", "query_count": 99},
-    "tpch":  {"bench_name": "TPC-H",  "query_count": 22},
-}
+SCHEMA = "tpcds"
+BENCH_NAME = "TPC-DS"
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Database
 # ---------------------------------------------------------------------------
 
-def detect_schema(script_path):
-    """Auto-detect schema from the script's filesystem location."""
-    abspath = os.path.abspath(script_path).lower()
-    if "tpcds" in abspath:
-        return "tpcds"
-    if "tpch" in abspath:
-        return "tpch"
-    return None
+def check_schema(conn):
+    """Verify the tpcds extension schema and bench_summary table exist."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = %s AND table_name = 'bench_summary'",
+        (SCHEMA,),
+    )
+    if cur.fetchone() is None:
+        print(
+            f"ERROR: {SCHEMA}.bench_summary not found.\n"
+            f"  Run the following in psql first:\n"
+            f"    CREATE EXTENSION {SCHEMA};\n"
+            f"    SELECT {SCHEMA}.bench();",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
-def parse_args():
-    ap = argparse.ArgumentParser(description="Generate benchmark report")
-    ap.add_argument("-d", "--dbname",  default=None, help="Database name (default: $PGDATABASE or current user)")
-    ap.add_argument("-H", "--host",    default=None, help="Database host")
-    ap.add_argument("-p", "--port",    default=None, help="Database port")
-    ap.add_argument("-U", "--user",    default=None, help="Database user")
-    ap.add_argument("--schema",        default=None, choices=["tpcds", "tpch"],
-                    help="Force schema (default: auto-detect from script path)")
-    ap.add_argument("--sf",            default=None, type=int, help="Override scale factor for directory naming")
-    ap.add_argument("--date",          default=None, help="Override date string YYYY-MM-DD (default: today)")
-    ap.add_argument("--outdir",        default=None, help="Output base directory (default: script's directory)")
-    return ap.parse_args()
-
-
-def connect_db(args):
-    params = {}
-    if args.dbname: params["dbname"] = args.dbname
-    if args.host:   params["host"]   = args.host
-    if args.port:   params["port"]   = args.port
-    if args.user:   params["user"]   = args.user
-    return psycopg2.connect(**params)
-
-
-# ---------------------------------------------------------------------------
-# Data fetching
-# ---------------------------------------------------------------------------
-
-def fetch_bench_data(conn, schema):
+def fetch_bench_data(conn):
     """Fetch latest benchmark results from bench_summary."""
     cur = conn.cursor()
     cur.execute(
         f"SELECT query_id, status, duration_ms, rows_returned, run_ts "
-        f"FROM {schema}.bench_summary ORDER BY query_id"
+        f"FROM {SCHEMA}.bench_summary ORDER BY query_id"
     )
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def fetch_metadata(conn, schema):
+def fetch_metadata(conn):
     """Collect PG version, GUCs, scale factor, system info."""
     cur = conn.cursor()
     meta = {}
@@ -108,7 +87,7 @@ def fetch_metadata(conn, schema):
         meta[f"pg_{guc}"] = cur.fetchone()[0]
 
     # Scale factor from extension config table
-    cur.execute(f"SELECT value FROM {schema}.config WHERE key = 'scale_factor'")
+    cur.execute(f"SELECT value FROM {SCHEMA}.config WHERE key = 'scale_factor'")
     row = cur.fetchone()
     meta["scale_factor"] = int(row[0]) if row and row[0] else None
 
@@ -151,7 +130,7 @@ def write_summary_csv(run_dir, rows):
             })
 
 
-def create_chart(run_dir, rows, bench_name, sf, date_str):
+def create_chart(run_dir, rows, sf, date_str):
     """Generate queries.png — vertical bar chart of per-query duration."""
     query_ids = [r["query_id"] for r in rows]
     durations = [float(r["duration_ms"]) for r in rows]
@@ -162,7 +141,7 @@ def create_chart(run_dir, rows, bench_name, sf, date_str):
     fig_w = max(14, len(query_ids) * 0.18)
     fig, ax = plt.subplots(figsize=(fig_w, 6))
 
-    # Detect outliers: if max > 3× the 95th percentile, clip Y axis
+    # Detect outliers: if max > 3x the 95th percentile, clip Y axis
     sorted_d = sorted(durations)
     p95 = sorted_d[int(len(sorted_d) * 0.95)] if len(sorted_d) >= 5 else max(sorted_d)
     y_cap = None
@@ -195,7 +174,7 @@ def create_chart(run_dir, rows, bench_name, sf, date_str):
     ok_count  = sum(1 for s in statuses if s == "OK")
     err_count = len(statuses) - ok_count
 
-    title = f"{bench_name} SF={sf} — {ok_count}/{len(query_ids)} OK"
+    title = f"{BENCH_NAME} SF={sf} — {ok_count}/{len(query_ids)} OK"
     if err_count:
         title += f", {err_count} errors"
     title += f"  |  Total: {total_str}"
@@ -221,7 +200,7 @@ def create_chart(run_dir, rows, bench_name, sf, date_str):
     plt.close(fig)
 
 
-def write_meta_json(run_dir, rows, metadata, schema, bench_name, sf, date_str):
+def write_meta_json(run_dir, rows, metadata, sf, date_str):
     durations = [float(r["duration_ms"]) for r in rows]
     ok_count  = sum(1 for r in rows if r["status"] == "OK")
     err_count = len(rows) - ok_count
@@ -232,15 +211,16 @@ def write_meta_json(run_dir, rows, metadata, schema, bench_name, sf, date_str):
     slowest_q = max(rows, key=lambda r: float(r["duration_ms"])) if ok_durations else None
 
     meta = {
-        "benchmark":    bench_name,
-        "schema":       schema,
+        "benchmark":    BENCH_NAME,
+        "schema":       SCHEMA,
         "date":         date_str,
         "scale_factor": sf,
         "run_ts":       rows[0]["run_ts"].isoformat() if rows[0].get("run_ts") else None,
         "postgresql": {
             "version":     metadata.get("pg_version", ""),
             "version_num": metadata.get("pg_version_num", 0),
-            **{k.replace("pg_", ""): v for k, v in metadata.items() if k.startswith("pg_") and k not in ("pg_version", "pg_version_num")},
+            **{k.replace("pg_", ""): v for k, v in metadata.items()
+               if k.startswith("pg_") and k not in ("pg_version", "pg_version_num")},
         },
         "system": {
             "hostname":  metadata.get("hostname", ""),
@@ -249,9 +229,9 @@ def write_meta_json(run_dir, rows, metadata, schema, bench_name, sf, date_str):
             "cpu_count": metadata.get("cpu_count", 0),
         },
         "results": {
-            "total_queries":    len(rows),
-            "ok_count":         ok_count,
-            "error_count":      err_count,
+            "total_queries":     len(rows),
+            "ok_count":          ok_count,
+            "error_count":       err_count,
             "total_duration_ms": round(total_ms, 2),
             "total_duration_s":  round(total_ms / 1000, 1),
             "min_duration_ms":   round(min(durations), 2) if durations else 0,
@@ -267,10 +247,8 @@ def write_meta_json(run_dir, rows, metadata, schema, bench_name, sf, date_str):
         json.dump(meta, f, indent=2, default=str)
 
 
-def update_readme(base_dir, schema):
+def update_readme(base_dir):
     """Regenerate README.md from all run directories."""
-    bench_name = CONFIGS[schema]["bench_name"]
-
     # Scan run directories
     pattern = os.path.join(base_dir, "????-??-??_sf*")
     run_dirs = sorted(glob.glob(pattern), reverse=True)
@@ -293,7 +271,7 @@ def update_readme(base_dir, schema):
     total_str = f"{total_s:.1f}s"
 
     lines = []
-    lines.append(f"# {bench_name} Benchmark Results\n")
+    lines.append(f"# {BENCH_NAME} Benchmark Results\n")
 
     # Latest run
     lines.append("## Latest Run\n")
@@ -306,7 +284,6 @@ def update_readme(base_dir, schema):
     lines.append("| Metric | Value |")
     lines.append("|--------|-------|")
     pg_ver = latest["postgresql"]["version"]
-    # Shorten PG version to just the first part
     pg_short = pg_ver.split(",")[0] if "," in pg_ver else pg_ver
     lines.append(f"| PostgreSQL | {pg_short} |")
     lines.append(f"| Scale Factor | {latest['scale_factor']} |")
@@ -334,7 +311,7 @@ def update_readme(base_dir, schema):
         lines.append("")
 
     lines.append("---")
-    lines.append("*Generated by `report.py`*")
+    lines.append("*Generated by `gen_chart.py`*")
     lines.append("")
 
     readme_path = os.path.join(base_dir, "README.md")
@@ -347,62 +324,53 @@ def update_readme(base_dir, schema):
 # ---------------------------------------------------------------------------
 
 def main():
-    args = parse_args()
-
-    # Detect schema
-    schema = args.schema or detect_schema(__file__)
-    if not schema or schema not in CONFIGS:
-        print("ERROR: Cannot detect benchmark type. Use --schema tpcds|tpch", file=sys.stderr)
-        sys.exit(1)
-    cfg = CONFIGS[schema]
-
-    # Connect
+    # Connect using standard PG environment variables
     try:
-        conn = connect_db(args)
+        conn = psycopg2.connect()
     except Exception as e:
         print(f"ERROR: Cannot connect to PostgreSQL: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # Verify schema exists
+    check_schema(conn)
+
     # Fetch data
-    rows = fetch_bench_data(conn, schema)
+    rows = fetch_bench_data(conn)
     if not rows:
-        print(f"ERROR: No data in {schema}.bench_summary. Run SELECT {schema}.bench() first.",
-              file=sys.stderr)
+        print(
+            f"ERROR: {SCHEMA}.bench_summary is empty.\n"
+            f"  Run SELECT {SCHEMA}.bench() first.",
+            file=sys.stderr,
+        )
         conn.close()
         sys.exit(1)
 
-    # Fetch metadata
-    metadata = fetch_metadata(conn, schema)
+    metadata = fetch_metadata(conn)
     conn.close()
 
-    # Scale factor
-    sf = args.sf or metadata.get("scale_factor") or "unknown"
-
-    # Date
-    date_str = args.date or datetime.date.today().isoformat()
-
-    # Base directory
-    base_dir = args.outdir or os.path.dirname(os.path.abspath(__file__))
+    sf = metadata.get("scale_factor") or "unknown"
+    date_str = datetime.date.today().isoformat()
+    base_dir = os.path.dirname(os.path.abspath(__file__))
 
     # Create run directory
     run_dir = make_run_dir(base_dir, date_str, sf)
     run_name = os.path.basename(run_dir)
 
-    print(f"{cfg['bench_name']} benchmark report")
-    print(f"  Schema: {schema}  SF: {sf}  Date: {date_str}")
+    print(f"{BENCH_NAME} benchmark report")
+    print(f"  SF: {sf}  Date: {date_str}")
     print(f"  Queries: {len(rows)}")
 
     # Generate outputs
     write_summary_csv(run_dir, rows)
     print(f"  wrote {run_name}/summary.csv")
 
-    create_chart(run_dir, rows, cfg["bench_name"], sf, date_str)
+    create_chart(run_dir, rows, sf, date_str)
     print(f"  wrote {run_name}/queries.png")
 
-    write_meta_json(run_dir, rows, metadata, schema, cfg["bench_name"], sf, date_str)
+    write_meta_json(run_dir, rows, metadata, sf, date_str)
     print(f"  wrote {run_name}/meta.json")
 
-    update_readme(base_dir, schema)
+    update_readme(base_dir)
     print(f"  updated README.md")
 
     # Summary
