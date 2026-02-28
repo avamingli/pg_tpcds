@@ -16,6 +16,9 @@ DSGen-software-code-4.0.0/tools/tokenizer.c
 DSGen-software-code-4.0.0/tools/.ctags_updated
 DSGen-software-code-4.0.0/tools/tags
 
+# Generated config (machine-specific)
+*_postgres.conf
+
 # pg_regress output
 results/
 regression.diffs
