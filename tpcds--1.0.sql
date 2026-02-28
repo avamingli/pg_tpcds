@@ -1565,6 +1565,86 @@ END;
 $func$;
 
 -- =============================================================================
+-- run(scale, parallel) — full pipeline: schema → data → load → query → bench
+-- =============================================================================
+-- Parameters:
+--   scale    : TPC-DS scale factor in GB.
+--              Official certifiable values: 1, 10, 100, 300, 1000, 3000, 10000,
+--              30000, 100000.  Other values work but dsdgen warns they are NOT
+--              valid for result publication.
+--   parallel : Controls two independent phases:
+--              • gen_data  — number of concurrent dsdgen worker processes.
+--                            Can be set as high as the CPU core count (e.g. 96).
+--              • load_data — number of concurrent table-COPY workers.
+--                            Internally capped at LEAST(parallel, 16) because
+--                            TPC-DS has only 25 tables and diminishing returns
+--                            kick in well below that limit.
+--
+-- Pipeline steps:
+--   1. gen_schema()               — (re)create all TPC-DS tables (drops first)
+--   2. gen_data(scale, parallel)  — run dsdgen with `parallel` worker processes
+--   3. load_data(workers)         — parallel COPY; workers = LEAST(parallel, 16)
+--   4. gen_query(scale)           — generate query set for this scale factor
+--   5. bench()                    — execute all queries and record results
+--
+-- Returns a text summary of each phase's output.
+CREATE OR REPLACE FUNCTION tpcds.run(
+    scale    INTEGER DEFAULT 1,
+    parallel INTEGER DEFAULT 1
+)
+RETURNS TEXT
+LANGUAGE plpgsql
+AS $func$
+DECLARE
+    _workers   INTEGER;
+    _t0        TIMESTAMPTZ;
+    _schema    TEXT;
+    _gendata   TEXT;
+    _load      TEXT;
+    _genquery  TEXT;
+    _bench     TEXT;
+BEGIN
+    _workers := LEAST(parallel, 16);
+    _t0      := clock_timestamp();
+
+    RAISE NOTICE 'run(): scale=%, parallel=% (gen_data), load workers=%',
+        scale, parallel, _workers;
+
+    /* 1. Schema */
+    RAISE NOTICE 'run(): step 1/5 — gen_schema()';
+    SELECT tpcds.gen_schema() INTO _schema;
+
+    /* 2. Data generation */
+    RAISE NOTICE 'run(): step 2/5 — gen_data(%, %)', scale, parallel;
+    SELECT tpcds.gen_data(scale, parallel) INTO _gendata;
+
+    /* 3. Load */
+    RAISE NOTICE 'run(): step 3/5 — load_data(%)', _workers;
+    SELECT tpcds.load_data(_workers) INTO _load;
+
+    /* 4. Query generation */
+    RAISE NOTICE 'run(): step 4/5 — gen_query(%)', scale;
+    SELECT tpcds.gen_query(scale) INTO _genquery;
+
+    /* 5. Benchmark */
+    RAISE NOTICE 'run(): step 5/5 — bench()';
+    SELECT tpcds.bench() INTO _bench;
+
+    RETURN format(
+        E'=== TPC-DS run complete in %s sec (scale=%s, parallel=%s, load_workers=%s) ===\n'
+        'gen_schema : %s\n'
+        'gen_data   : %s\n'
+        'load_data  : %s\n'
+        'gen_query  : %s\n'
+        'bench      : %s',
+        round(extract(epoch from clock_timestamp() - _t0)::numeric, 1),
+        scale, parallel, _workers,
+        _schema, _gendata, _load, _genquery, _bench
+    );
+END;
+$func$;
+
+-- =============================================================================
 -- Extension loaded — remind user to configure data_dir
 -- =============================================================================
 DO $notice$
@@ -1573,10 +1653,11 @@ BEGIN
         '  tpcds extension installed.\n'
         '  Default data_dir is /tmp/tpcds_data — this may be too small for large scale factors.\n'
         '  To change it:  SELECT tpcds.config(''data_dir'', ''/your/path'');\n'
-        '  Quick start:   SELECT tpcds.gen_schema();\n'
-        '                 SELECT tpcds.gen_data(1);\n'
-        '                 SELECT tpcds.load_data();\n'
-        '                 SELECT tpcds.gen_query();\n'
+        '  One-shot:      SELECT tpcds.run(scale := 1, parallel := 4);\n'
+        '  Step by step:  SELECT tpcds.gen_schema();\n'
+        '                 SELECT tpcds.gen_data(1, 4);\n'
+        '                 SELECT tpcds.load_data(4);\n'
+        '                 SELECT tpcds.gen_query(1);\n'
         '                 SELECT tpcds.bench();';
 END;
 $notice$;
