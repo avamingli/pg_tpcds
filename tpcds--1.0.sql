@@ -905,10 +905,22 @@ BEGIN
         _data_dir := '/tmp/tpcds_data';
     END IF;
 
-    SELECT value::INTEGER INTO _parallel FROM tpcds.config WHERE key = 'parallel';
-    IF _parallel IS NULL THEN
+    -- Auto-detect parallelism from data files (no config dependency)
+    IF EXISTS (
+        SELECT 1 FROM pg_ls_dir(_data_dir) f WHERE f = 'dbgen_version.dat'
+    ) THEN
         _parallel := 1;
+    ELSE
+        SELECT regexp_replace(f, '^dbgen_version_\d+_(\d+)\.dat$', '\1')::INTEGER
+        INTO _parallel
+        FROM pg_ls_dir(_data_dir) f
+        WHERE f ~ '^dbgen_version_\d+_\d+\.dat$'
+        LIMIT 1;
     END IF;
+    IF _parallel IS NULL THEN
+        RAISE EXCEPTION 'No TPC-DS data files found in %', _data_dir;
+    END IF;
+    RAISE NOTICE 'Auto-detected parallel = % from data files', _parallel;
 
     -- Truncate all tables before loading
     FOREACH _tbl IN ARRAY _tables LOOP
