@@ -29,7 +29,7 @@ make install
 ```sql
 CREATE EXTENSION tpcds;
 SELECT tpcds.config('data_dir', '/data/tpcds_tmp');  -- set data dir (default: /tmp/tpcds_data)
-CALL tpcds.run(scale := 1, parallel := 8);         -- full pipeline with 8 workers
+CALL tpcds.run(1, 8);  -- 1 scale factor (GB), 8 parallel workers
 ```
 
 `run()` executes the full pipeline: schema → data generation → load → query generation → benchmark.
@@ -77,8 +77,8 @@ Built and tested on **PostgreSQL 19devel**. Older versions should also work. If 
 Runs the complete benchmark pipeline in one call.
 
 ```sql
-CALL tpcds.run();                          -- SF=1, single-threaded
-CALL tpcds.run(scale := 100, parallel := 32);  -- SF=100, 32 dsdgen workers
+CALL tpcds.run();       -- SF=1, single-threaded
+CALL tpcds.run(100, 32);  -- SF=100, 32 dsdgen workers
 ```
 
 `parallel` controls both data generation (dsdgen workers) and loading (table-COPY workers, capped
