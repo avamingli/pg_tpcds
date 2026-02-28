@@ -24,18 +24,27 @@ make install
 
 ## Quick Start
 
+### One-shot
+
 ```sql
-CREATE EXTENSION tpcds;       -- 1. install the extension
-SELECT tpcds.gen_schema();    -- 2. create 25 TPC-DS tables
-SELECT tpcds.gen_data(1);     -- 3. generate SF-1 (~1GB) .dat files
-SELECT tpcds.gen_data(1, 8);  -- 3. same, but with 8 parallel workers
-SELECT tpcds.load_data();     -- 4. load .dat files into tables (auto-analyzes)
-SELECT tpcds.gen_query();     -- 5. generate 99 queries, saved to query_dir as .sql files
-SELECT tpcds.bench();         -- 6. run all 99 queries, results + summary.csv in results_dir
-SELECT tpcds.clean_data();    -- 7. (optional) delete .dat files to free disk space
+CREATE EXTENSION tpcds;
+SELECT tpcds.config('data_dir', '/data/tpcds_tmp');  -- set data dir (default: /tmp/tpcds_data)
+CALL tpcds.run(scale := 1, parallel := 8);         -- full pipeline with 8 workers
 ```
 
-That's it. Schema, data, queries, benchmark — done.
+`run()` executes the full pipeline: schema → data generation → load → query generation → benchmark.
+
+### Step by step
+
+```sql
+CREATE EXTENSION tpcds;
+SELECT tpcds.gen_schema();        -- 1. create 25 TPC-DS tables
+SELECT tpcds.gen_data(1, 8);      -- 2. generate SF-1 (~1 GB) .dat files, 8 parallel workers
+SELECT tpcds.load_data(8);        -- 3. load .dat files into tables, 8 parallel workers
+SELECT tpcds.gen_query(1);        -- 4. generate 99 queries for SF-1
+SELECT tpcds.bench();             -- 5. run all 99 queries
+SELECT tpcds.clean_data();        -- 6. (optional) delete .dat files to free disk space
+```
 
 Check the latest results:
 
@@ -45,16 +54,6 @@ SELECT * FROM tpcds.bench_summary;
 
 Built and tested on **PostgreSQL 19devel**. Older versions should also work. If not, please create an issue.
 
-## Run the Benchmark
-
-```sql
-SELECT tpcds.bench();                          -- run all 99 queries
-SELECT tpcds.bench('EXPLAIN');                  -- explain all 99 queries
-SELECT tpcds.bench('EXPLAIN (ANALYZE, COSTS OFF)'); -- explain with options
-```
-
-Per-query output is written to `results_dir` (`queryXX.out` or `queryXX_explain.out`), plus a `summary.csv` with timing for all 99 queries. The `tpcds.bench_summary` table is updated after each run.
-
 ## Functions
 
 | Function | Returns | Description |
@@ -62,19 +61,35 @@ Per-query output is written to `results_dir` (`queryXX.out` or `queryXX_explain.
 | `tpcds.config(key)` | TEXT | Get config value |
 | `tpcds.config(key, value)` | TEXT | Set config value |
 | `tpcds.info()` | TABLE | Show all resolved paths and scale factor |
+| `tpcds.run(scale, parallel=1)` | — | Full pipeline: gen_schema → gen_data → load_data → gen_query → bench |
 | `tpcds.gen_schema()` | TEXT | Create 25 TPC-DS tables under `tpcds` schema |
-| `tpcds.gen_data(scale, parallel=1)` | TEXT | Generate .dat files via dsdgen. Set `parallel > 1` for multiple workers. |
-| `tpcds.load_data()` | TEXT | Load .dat files into tables and analyze. Can be re-run without regenerating. |
-| `tpcds.clean_data()` | TEXT | Delete .dat files from data_dir to free disk space. |
-| `tpcds.gen_query(scale)` | TEXT | Generate 99 queries. `scale` overrides config (default: from gen_data). |
+| `tpcds.gen_data(scale, parallel=1)` | TEXT | Generate .dat files via dsdgen |
+| `tpcds.load_data(workers=4)` | TEXT | Load .dat files into tables and analyze |
+| `tpcds.clean_data()` | TEXT | Delete .dat files from data_dir to free disk space |
+| `tpcds.gen_query(scale)` | TEXT | Generate 99 queries for the given scale factor |
 | `tpcds.show(qid)` | TEXT | Return query text |
 | `tpcds.exec(qid)` | TEXT | Execute one query, save result to `tpcds.bench_results` |
 | `tpcds.bench(mode)` | TEXT | Run or explain all 99 queries, update `bench_summary` |
 | `tpcds.explain(qid, opts)` | SETOF TEXT | EXPLAIN a single query |
 
+### run(scale, parallel)
+
+Runs the complete benchmark pipeline in one call.
+
+```sql
+CALL tpcds.run();                          -- SF=1, single-threaded
+CALL tpcds.run(scale := 100, parallel := 32);  -- SF=100, 32 dsdgen workers
+```
+
+`parallel` controls both data generation (dsdgen workers) and loading (table-COPY workers, capped
+internally at `LEAST(parallel, 16)` since TPC-DS has only 25 tables).
+
+Official certifiable scale factors: 1, 10, 100, 300, 1000, 3000, 10000, 30000, 100000.
+Other values work but dsdgen warns they are not valid for result publication.
+
 ### show(qid)
 
-Show the query1's text.
+Show the query 1's text.
 ```sql
 SELECT tpcds.show(1);
                               show
@@ -106,7 +121,7 @@ SELECT tpcds.show(1);
 
 ### explain(qid, opts)
 
-See the plan of query1.
+See the plan of query 1.
 ```sql
 SELECT * FROM tpcds.explain(1, 'COSTS OFF');
                           explain
@@ -143,15 +158,19 @@ SELECT * FROM tpcds.explain(1, 'COSTS OFF');
 
 ### bench(mode)
 
+Run all 99 queries and record results.
+
 ```sql
-SELECT tpcds.bench();                          -- execute
-SELECT tpcds.bench('EXPLAIN');                  -- explain
+SELECT tpcds.bench();                               -- execute all 99 queries
+SELECT tpcds.bench('EXPLAIN');                      -- explain all 99 queries
 SELECT tpcds.bench('EXPLAIN (ANALYZE, COSTS OFF)'); -- explain with options
 ```
 
 Output saved to `results_dir`:
 - Per-query: `query1.out` ... `query99.out` (or `query1_explain.out` ... `query99_explain.out`)
 - Summary: `summary.csv` — query_id, status, duration_ms, rows_returned
+
+`tpcds.bench_summary` is updated after each run with the latest results.
 
 ## Where Things Are Stored
 
@@ -171,7 +190,7 @@ Output saved to `results_dir`:
 |-----------|----------|
 | `query_dir` | `query1.sql` ... `query99.sql` from `gen_query()` |
 | `results_dir` | Per-query `.out` files and `summary.csv` from `bench()` |
-| `data_dir` | Temporary `.dat` files from `gen_data()`, cleaned up after load (default: `/tmp/tpcds_data`) |
+| `data_dir` | Temporary `.dat` files from `gen_data()` (default: `/tmp/tpcds_data`) |
 
 Check all resolved paths:
 
@@ -205,7 +224,7 @@ SELECT tpcds.config('query_dir', '/data/queries');
 
 `gen_query()` automatically patches raw `dsqgen` output:
 
-1. **Date intervals** — `+ 14 days` &rarr; `+ interval '14 days'`
-2. **Column name** (query 30) — `c_last_review_date_sk` &rarr; `c_last_review_date`
+1. **Date intervals** — `+ 14 days` → `+ interval '14 days'`
+2. **Column name** (query 30) — `c_last_review_date_sk` → `c_last_review_date`
 3. **GROUPING alias** (queries 36, 70, 86) — expands `lochierarchy` to full `grouping()` expression
 4. **Division by zero** (query 90) — wraps denominator in `nullif(..., 0)`
