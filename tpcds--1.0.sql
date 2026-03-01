@@ -1336,7 +1336,11 @@ $func$;
 --   bench('EXPLAIN')            — explain all 99, save queryXX_explain.out
 --   bench('EXPLAIN (COSTS OFF)')— explain with options, save queryXX_explain.out
 -- =============================================================================
-CREATE OR REPLACE FUNCTION tpcds.bench(mode TEXT DEFAULT NULL)
+CREATE OR REPLACE FUNCTION tpcds.bench(
+    mode TEXT DEFAULT NULL,
+    timeout_sec INTEGER DEFAULT NULL,
+    skip INTEGER[] DEFAULT NULL
+)
 RETURNS TEXT
 LANGUAGE plpgsql
 AS $func$
@@ -1364,12 +1368,24 @@ DECLARE
     _ok_count INTEGER := 0;
     _err_count INTEGER := 0;
     _skip_count INTEGER := 0;
+    _timeout_count INTEGER := 0;
     _bench_dur NUMERIC;
     _saved_path TEXT;
+    _timer_file TEXT;
+    _my_pid INTEGER;
 BEGIN
     _bench_start := now();
     _saved_path := current_setting('search_path');
     PERFORM set_config('search_path', 'tpcds, public', false);
+    _my_pid := pg_backend_pid();
+    _timer_file := format('/tmp/.tpcds_timer_%s', _my_pid);
+
+    IF timeout_sec IS NOT NULL THEN
+        RAISE NOTICE 'Per-query timeout: %s', timeout_sec;
+    END IF;
+    IF skip IS NOT NULL THEN
+        RAISE NOTICE 'Skipping queries: %', skip;
+    END IF;
 
     IF mode IS NOT NULL AND upper(btrim(mode)) LIKE 'EXPLAIN%' THEN
         _is_explain := true;
@@ -1384,11 +1400,29 @@ BEGIN
 
 
     FOR _qid IN 1..99 LOOP
+        -- Skip user-requested queries
+        IF skip IS NOT NULL AND _qid = ANY(skip) THEN
+            _skip_count := _skip_count + 1;
+            RAISE NOTICE '[%/99] query %: SKIP (user-requested)  elapsed %s',
+                _qid, _qid,
+                round(extract(epoch from clock_timestamp() - _bench_start)::numeric, 1);
+            CONTINUE;
+        END IF;
+
         SELECT query_text INTO _sql FROM tpcds.query WHERE query.query_id = _qid;
         IF _sql IS NULL THEN
             _skip_count := _skip_count + 1;
-            RAISE NOTICE 'query %: SKIP (not found)', _qid;
+            RAISE NOTICE '[%/99] query %: SKIP (not found)  elapsed %s',
+                _qid, _qid,
+                round(extract(epoch from clock_timestamp() - _bench_start)::numeric, 1);
             CONTINUE;
+        END IF;
+
+        -- Start background cancel timer for per-query timeout
+        IF timeout_sec IS NOT NULL THEN
+            EXECUTE format('COPY (SELECT 1) TO PROGRAM %L',
+                format('bash -c ''(sleep %s && psql -qAtc "SELECT pg_cancel_backend(%s)") & echo $! > %s''',
+                       timeout_sec, _my_pid, _timer_file));
         END IF;
 
         _sql := btrim(_sql, E' \t\n\r');
@@ -1427,11 +1461,17 @@ BEGIN
                     END LOOP;
                     _dur := extract(epoch from clock_timestamp() - _start_ts) * 1000;
                     _total_dur := _total_dur + _dur;
-                EXCEPTION WHEN OTHERS THEN
-                    _status := 'ERROR: ' || SQLERRM;
-                    _all_lines := _all_lines || 'ERROR: ' || SQLERRM || E'\n';
-                    _dur := extract(epoch from clock_timestamp() - _start_ts) * 1000;
-                    _total_dur := _total_dur + _dur;
+                EXCEPTION
+                    WHEN query_canceled THEN
+                        _status := format('TIMEOUT (%ss)', timeout_sec);
+                        _dur := extract(epoch from clock_timestamp() - _start_ts) * 1000;
+                        _total_dur := _total_dur + _dur;
+                        _all_lines := _all_lines || _status || E'\n';
+                    WHEN OTHERS THEN
+                        _status := 'ERROR: ' || SQLERRM;
+                        _all_lines := _all_lines || 'ERROR: ' || SQLERRM || E'\n';
+                        _dur := extract(epoch from clock_timestamp() - _start_ts) * 1000;
+                        _total_dur := _total_dur + _dur;
                 END;
             ELSE
                 BEGIN
@@ -1444,14 +1484,30 @@ BEGIN
                     _all_lines := _all_lines
                         || format('Statement %s: %s rows, %s ms',
                                   _part, _rows, round(_dur, 2)) || E'\n';
-                EXCEPTION WHEN OTHERS THEN
-                    _status := 'ERROR: ' || SQLERRM;
-                    _dur := extract(epoch from clock_timestamp() - _start_ts) * 1000;
-                    _total_dur := _total_dur + _dur;
-                    _all_lines := _all_lines || 'ERROR: ' || SQLERRM || E'\n';
+                EXCEPTION
+                    WHEN query_canceled THEN
+                        _status := format('TIMEOUT (%ss)', timeout_sec);
+                        _dur := extract(epoch from clock_timestamp() - _start_ts) * 1000;
+                        _total_dur := _total_dur + _dur;
+                        _all_lines := _all_lines || _status || E'\n';
+                    WHEN OTHERS THEN
+                        _status := 'ERROR: ' || SQLERRM;
+                        _dur := extract(epoch from clock_timestamp() - _start_ts) * 1000;
+                        _total_dur := _total_dur + _dur;
+                        _all_lines := _all_lines || 'ERROR: ' || SQLERRM || E'\n';
                 END;
             END IF;
         END LOOP;
+
+        -- Kill the background cancel timer (if query finished before timeout)
+        IF timeout_sec IS NOT NULL THEN
+            BEGIN
+                EXECUTE format('COPY (SELECT 1) TO PROGRAM %L',
+                    format('kill $(cat %s 2>/dev/null) 2>/dev/null; rm -f %s',
+                           _timer_file, _timer_file));
+            EXCEPTION WHEN OTHERS THEN NULL;
+            END;
+        END IF;
 
         INSERT INTO tpcds.bench_results (query_id, status, duration_ms, rows_returned)
         VALUES (_qid, _status, round(_total_dur, 2), _total_rows);
@@ -1471,6 +1527,8 @@ BEGIN
 
         IF _status = 'OK' THEN
             _ok_count := _ok_count + 1;
+        ELSIF _status LIKE 'TIMEOUT%' THEN
+            _timeout_count := _timeout_count + 1;
         ELSE
             _err_count := _err_count + 1;
         END IF;
@@ -1503,8 +1561,8 @@ BEGIN
 
     PERFORM set_config('search_path', _saved_path, false);
 
-    RETURN format('Completed: %s OK, %s errors, %s skipped in %s sec. Results: %s/summary.csv',
-        _ok_count, _err_count, _skip_count, _bench_dur, _results_dir);
+    RETURN format('Completed: %s OK, %s errors, %s timeouts, %s skipped in %s sec. Results: %s/summary.csv',
+        _ok_count, _err_count, _timeout_count, _skip_count, _bench_dur, _results_dir);
 END;
 $func$;
 

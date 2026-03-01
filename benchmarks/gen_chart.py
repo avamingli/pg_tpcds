@@ -32,6 +32,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 
+from chart_utils import fix_text_overlaps
+
 SCHEMA = "tpcds"
 BENCH_NAME = "TPC-DS"
 
@@ -196,6 +198,7 @@ def create_chart(run_dir, rows, sf, date_str):
                 ha="right", va="bottom", fontsize=8, color="gray")
 
     plt.tight_layout()
+    fix_text_overlaps(fig, ax)
     fig.savefig(os.path.join(run_dir, "queries.png"), dpi=150)
     plt.close(fig)
 
