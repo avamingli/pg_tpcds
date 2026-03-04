@@ -58,7 +58,7 @@ def load_from_plan_files(dirpath):
     """Scan *.txt files in a directory, parse Execution Time from each."""
     rows = []
     for fname in sorted(os.listdir(dirpath)):
-        if not fname.endswith(".txt"):
+        if not fname.endswith(".txt") or "_result" in fname:
             continue
         m = re.search(r"q(?:uery)?[_-]?(\d+)", fname)
         if not m:
